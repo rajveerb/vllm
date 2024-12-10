@@ -761,6 +761,7 @@ class SequenceGroup:
         if (self.metrics.first_token_time is None
                 and self.first_seq.get_output_len() == 1):
             self.metrics.first_token_time = time
+            print({'RequestID':{self.request_id}, 'FirstTokenTime':{time - self.metrics.arrival_time}})
 
     def maybe_set_first_scheduled_time(self, time: float) -> None:
         """Sets the first scheduled time and time in queue for Request
@@ -772,6 +773,8 @@ class SequenceGroup:
     def set_finished_time(self, time: Optional[float]) -> None:
         """Sets the finished time for Request level timings."""
         self.metrics.finished_time = time
+        print({'RequestID':{self.request_id}, 'DecodeTime':{time - self.metrics.first_token_time}})
+
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
