@@ -1,8 +1,6 @@
 import enum
-from typing import Dict, List, Optional
-from abc import ABC, abstractmethod, abstractproperty
-
-from vllm.block import PhysicalTokenBlock
+from abc import ABC, abstractmethod
+from typing import OrderedDict, Tuple
 
 
 class EvictionPolicy(enum.Enum):
@@ -10,7 +8,6 @@ class EvictionPolicy(enum.Enum):
        Evictor subclass.
     """
     LRU = enum.auto()
-    FIFO = enum.auto()
 
 
 class Evictor(ABC):
@@ -23,31 +20,51 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
-    def __contains__(self, block_hash: int) -> bool:
+    def __contains__(self, block_id: int) -> bool:
         pass
 
     @abstractmethod
-    def evict(self) -> PhysicalTokenBlock:
-        """Runs the eviction algorithm and returns the evicted block"""
+    def evict(self) -> Tuple[int, int]:
+        """Runs the eviction algorithm and returns the evicted block's
+        content hash along with physical block id along with physical block id
+        """
         pass
 
     @abstractmethod
-    def add(self, block: PhysicalTokenBlock):
+    def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
+            last_accessed: float):
         """Adds block to the evictor, making it a candidate for eviction"""
         pass
 
     @abstractmethod
-    def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        """Simply removes the block with the hash value block_hash from the
-        evictor. Caller is responsible for making sure that block_hash is
-        contained in the evictor before calling remove. Should be used to
-        "bring back" blocks that have been freed but not evicted yet.
-        """
+    def update(self, block_id: int, last_accessed: float):
+        """Update corresponding block's access time in metadata"""
         pass
 
-    @abstractproperty
+    @abstractmethod
+    def remove(self, block_id: int):
+        """Remove a given block id from the cache."""
+        pass
+
+    @property
+    @abstractmethod
     def num_blocks(self) -> int:
         pass
+
+
+class BlockMetaData:
+    """Data structure for storing key data describe cached block, so that
+    evitor could use to make its decision which one to choose for eviction
+
+    Here we use physical block id as the dict key, as there maybe several
+    blocks with the same content hash, but their physical id is unique.
+    """
+
+    def __init__(self, content_hash: int, num_hashed_tokens: int,
+                 last_accessed: float):
+        self.content_hash = content_hash
+        self.num_hashed_tokens = num_hashed_tokens
+        self.last_accessed = last_accessed
 
 
 class LRUEvictor(Evictor):
@@ -59,93 +76,48 @@ class LRUEvictor(Evictor):
     """
 
     def __init__(self):
-        self.free_table: Dict[int, PhysicalTokenBlock] = {}
+        self.free_table: OrderedDict[int, BlockMetaData] = OrderedDict()
 
-    def __contains__(self, block_hash: int) -> bool:
-        return block_hash in self.free_table
+    def __contains__(self, block_id: int) -> bool:
+        return block_id in self.free_table
 
-    # TODO: The performance of this evict function can be optimized further.
-    def evict(self) -> PhysicalTokenBlock:
-        free_blocks: List[PhysicalTokenBlock] = list(self.free_table.values())
-        if len(free_blocks) == 0:
-            raise ValueError("No usable cache memory left")
-
-        # Find lowest timestamp
-        lowest_timestamp = free_blocks[0].last_accessed
-        for block in free_blocks:
-            if block.last_accessed < lowest_timestamp:
-                lowest_timestamp = block.last_accessed
-
-        # Find all blocks with the lowest timestamp
-        least_recent: List[PhysicalTokenBlock] = []
-        for block in free_blocks:
-            if block.last_accessed == lowest_timestamp:
-                least_recent.append(block)
-
-        # Find highest prefix count per block
-        highest_num_hashed_tokens = 0
-        for block in least_recent:
-            if block.num_hashed_tokens > highest_num_hashed_tokens:
-                highest_num_hashed_tokens = block.num_hashed_tokens
-
-        evicted_block: Optional[PhysicalTokenBlock] = None
-
-        # Find the first block with the lowest timestamp
-        for block in least_recent:
-            if block.num_hashed_tokens == highest_num_hashed_tokens:
-                evicted_block = block
-                break
-
-        assert evicted_block is not None
-
-        del self.free_table[evicted_block.block_hash]
-
-        evicted_block.computed = False
-        return evicted_block
-
-    def add(self, block: PhysicalTokenBlock):
-        self.free_table[block.block_hash] = block
-
-    def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        if block_hash not in self.free_table:
-            raise ValueError(
-                "Attempting to remove block that's not in the evictor")
-        block: PhysicalTokenBlock = self.free_table[block_hash]
-        del self.free_table[block_hash]
-        return block
-
-    @property
-    def num_blocks(self) -> int:
-        return len(self.free_table)
-
-
-class RandomEvictor(Evictor):
-    """Evicts in a first-in-first-out order"""
-
-    def __init__(self):
-        self.free_table: Dict[int, PhysicalTokenBlock] = {}
-
-    def __contains__(self, block_hash: int) -> bool:
-        return block_hash in self.free_table
-
-    def evict(self) -> PhysicalTokenBlock:
+    def evict(self) -> Tuple[int, int]:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
-        evicted_block = next(iter(self.free_table.values()))
-        evicted_block.computed = False
-        del self.free_table[evicted_block.block_hash]
-        return evicted_block
 
-    def add(self, block: PhysicalTokenBlock):
-        self.free_table[block.block_hash] = block
+        evicted_block, evicted_block_id = None, None
+        # The blocks with the lowest timestamps should be placed consecutively
+        # at the start of OrderedDict. Loop through all these blocks to
+        # find the one with maximum number of hashed tokens.
+        for _id, block in self.free_table.items():
+            if evicted_block is None:
+                evicted_block, evicted_block_id = block, _id
+                continue
+            if evicted_block.last_accessed < block.last_accessed:
+                break
+            if evicted_block.num_hashed_tokens < block.num_hashed_tokens:
+                evicted_block, evicted_block_id = block, _id
 
-    def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        if block_hash not in self.free_table:
+        assert evicted_block is not None
+        assert evicted_block_id is not None
+        self.free_table.pop(evicted_block_id)
+
+        return evicted_block_id, evicted_block.content_hash
+
+    def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
+            last_accessed: float):
+        self.free_table[block_id] = BlockMetaData(content_hash,
+                                                  num_hashed_tokens,
+                                                  last_accessed)
+
+    def update(self, block_id: int, last_accessed: float):
+        self.free_table[block_id].last_accessed = last_accessed
+
+    def remove(self, block_id: int):
+        if block_id not in self.free_table:
             raise ValueError(
                 "Attempting to remove block that's not in the evictor")
-        block: PhysicalTokenBlock = self.free_table[block_hash]
-        del self.free_table[block_hash]
-        return block
+        self.free_table.pop(block_id)
 
     @property
     def num_blocks(self) -> int:
@@ -155,7 +127,5 @@ class RandomEvictor(Evictor):
 def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
     if eviction_policy == EvictionPolicy.LRU:
         return LRUEvictor()
-    elif eviction_policy == EvictionPolicy.FIFO:
-        return RandomEvictor()
     else:
         raise ValueError(f"Unknown cache eviction policy: {eviction_policy}")
