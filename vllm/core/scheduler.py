@@ -20,6 +20,15 @@ from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
 
+# init a separate logger just for tracking per-iteration stats
+stat_logger = init_logger(f'{__name__}_stats')
+# create file handler for stat_logger
+# TODO: choose a new filename if file already exists, rather than overwriting
+fh = logging.FileHandler('scheduler_stats.log', mode="w")
+fmt = logging.Formatter("[%(asctime)s] %(message)s")
+fh.setFormatter(fmt)
+stat_logger.addHandler(fh)
+
 # Test-only. If configured, decode is preempted with
 # ARTIFICIAL_PREEMPTION_PROB% probability.
 ENABLE_ARTIFICIAL_PREEMPT = bool(
@@ -1373,9 +1382,9 @@ class Scheduler:
         if num_total_cpu:  # Guard against both None and 0
             num_free_cpu = self.block_manager.get_num_free_cpu_blocks()
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
-        logger.info(
-            "GPU KV cache usage: %.1f%%, "
-            "CPU KV cache usage: %.1f%%.",
+        # stat_logger will add this to file
+        stat_logger.info(
+            "KV Cache Usage (%%; GPU, CPU): %.5f, %.5f",
             gpu_cache_usage_sys * 100,
             cpu_cache_usage_sys * 100
         )
