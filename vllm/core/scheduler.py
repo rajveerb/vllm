@@ -1360,6 +1360,26 @@ class Scheduler:
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
 
+        # Print out % KV usage to stdout
+        # TODO: figure out how to integrate this w/ vLLMs metrics logger
+        num_total_gpu = self.cache_config.num_gpu_blocks
+        gpu_cache_usage_sys = 0.
+        if num_total_gpu:  # Guard against both None and 0
+            num_free_gpu = self.block_manager.get_num_free_gpu_blocks()
+            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
+
+        num_total_cpu = self.cache_config.num_cpu_blocks
+        cpu_cache_usage_sys = 0.
+        if num_total_cpu:  # Guard against both None and 0
+            num_free_cpu = self.block_manager.get_num_free_cpu_blocks()
+            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
+        logger.info(
+            "GPU KV cache usage: %.1f%%, "
+            "CPU KV cache usage: %.1f%%.",
+            gpu_cache_usage_sys * 100,
+            cpu_cache_usage_sys * 100
+        )
+
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
