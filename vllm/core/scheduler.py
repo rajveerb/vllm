@@ -17,14 +17,19 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
+import logging
+from datetime import datetime
 
 logger = init_logger(__name__)
 
 # init a separate logger just for tracking per-iteration stats
 stat_logger = init_logger(f'{__name__}_stats')
+# disable stdout/stderr
+stat_logger.propagate = False
 # create file handler for stat_logger
 # TODO: choose a new filename if file already exists, rather than overwriting
-fh = logging.FileHandler('scheduler_stats.log', mode="w")
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+fh = logging.FileHandler(f'scheduler_stats_{timestamp}.log', mode="w", delay=True) # avoid empty log
 fmt = logging.Formatter("[%(asctime)s] %(message)s")
 fh.setFormatter(fmt)
 stat_logger.addHandler(fh)
